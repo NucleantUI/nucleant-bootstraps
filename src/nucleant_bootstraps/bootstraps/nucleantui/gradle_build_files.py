@@ -553,7 +553,7 @@ val swiftTargets = mapOf(
  * per dependency that ships them, already narrowed to the right ABI by the
  * `<dir>/<abi>/lib` layout every Nucleant package uses.
  */
-val vendoredNativeRoots = listOf(
+val vendoredNativeRoots = listOf<File>(
 {vendored}
 )
 
@@ -848,7 +848,7 @@ val swiftRuntimeAbis = mapOf(
 {abi_entries}
 )
 
-val swiftRuntimeLibs = listOf({runtime_libs})
+val swiftRuntimeLibs = listOf<String>({runtime_libs})
 
 val copySwiftRuntime = tasks.register<Copy>("copySwiftRuntime") {
     group = "swift"
