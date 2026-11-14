@@ -39,7 +39,7 @@ src/nucleant_bootstraps/
   bootstrap.py          delegate + bootstrap protocols
   config_models.py      the nucleant.toml shape a bootstrap reads
   bootstraps/nucleantui/
-    swift_config.py         [swift] parsing, dependencies
+    swift_config.py         [nucleantui] + [swift] parsing, dependencies
     swift_package_files.py  Android Main Swift Package + desktop Package.swift
     gradle_builder.py       Android project
     gradle_build_files.py   Gradle/Kotlin DSL templates and tasks

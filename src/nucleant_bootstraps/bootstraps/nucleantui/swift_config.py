@@ -1,10 +1,18 @@
-"""The ``[swift]`` table of ``nucleant.toml``, read by the nucleantui bootstrap.
+"""The ``[nucleantui]`` and ``[swift]`` tables of ``nucleant.toml``, read by the
+nucleantui bootstrap.
 
 What a NucleantUI app's Swift side is made of is this bootstrap's business, so
 it parses the table itself from the raw TOML the CLI hands over, rather than
 having it typed in NucleantProject's shared model.
 
 Example::
+
+    # NucleantUI is the bootstrap's own dependency: always there, this table
+    # only picks which one. Missing table = GitHub, branch master.
+    [nucleantui]
+    branch = "master"      # or up_to_major = "0.1.0" / exact = "0.1.0"
+    # url = "https://github.com/<you>/NucleantUI.git"  # a fork
+    # path = "../NucleantUI"                           # a local fork
 
     [swift]
     # The Swift target the app's sources compile into (desktop executable
@@ -20,14 +28,17 @@ Example::
     [swift.env]
     # NUCLEANT_ANDROID_USE_AHARDWAREBUFFER = "1"
 
+    # Packages beyond NucleantUI.
     [[swift.dependencies]]
-    name = "NucleantUI"
-    url = "https://github.com/NucleantUI/NucleantUI.git"
-    branch = "master"
-    products = ["NucleantUI"]
+    name = "Yams"
+    url = "https://github.com/jpsim/Yams.git"
+    up_to_major = "6.0.0"
+    products = ["Yams"]
 
 A dependency takes either ``path`` (relative to the project directory, or
-absolute) or ``url`` plus one of ``branch`` / ``from`` / ``exact``.
+absolute) or ``url`` plus one of ``branch`` / ``up_to_major`` / ``exact``
+(``up_to_major`` is SwiftPM's ``from:``). ``[nucleantui]`` takes the same
+keys, with ``url`` defaulting to the NucleantUI repository.
 
 The same dependency list feeds all three generated projects — the desktop
 ``Package.swift``, the Android Main Swift Package and the Xcode project — so
@@ -45,6 +56,11 @@ from ...tools import swift_identifier
 DEFAULT_ANDROID_PACKAGE = "project_dist/gradle/swift"
 DEFAULT_MACOS_DEPLOYMENT = "14.0"
 DEFAULT_IOS_DEPLOYMENT = "17.0"
+
+NUCLEANTUI_URL = "https://github.com/NucleantUI/NucleantUI.git"
+NUCLEANTUI_PRODUCT = "NucleantUI"
+DEFAULT_NUCLEANTUI_BRANCH = "master"
+_VERSION_KEYS = ("branch", "up_to_major", "exact")
 
 #: Written into every generated Package.swift so a later run can tell its own
 #: output from a manifest the project wrote by hand.
@@ -65,9 +81,19 @@ class SwiftDependency:
     path: Path | None = None
     url: str | None = None
     branch: str | None = None
-    version_from: str | None = None
+    up_to_major: str | None = None
     exact: str | None = None
     products: tuple[str, ...] = ()
+
+    @property
+    def identity(self) -> str:
+        """SwiftPM's package identity: the checkout or repository name."""
+        if self.path is not None:
+            return self.path.name.lower()
+        if self.url:
+            last = self.url.rstrip("/").rsplit("/", 1)[-1]
+            return last.removesuffix(".git").lower()
+        return self.name.lower()
 
     @property
     def product_names(self) -> tuple[str, ...]:
@@ -91,11 +117,11 @@ class SwiftDependency:
             return f'.package(url: "{self.url}", branch: "{self.branch}")'
         if self.exact:
             return f'.package(url: "{self.url}", exact: "{self.exact}")'
-        if self.version_from:
-            return f'.package(url: "{self.url}", from: "{self.version_from}")'
+        if self.up_to_major:
+            return f'.package(url: "{self.url}", from: "{self.up_to_major}")'
         raise SwiftConfigError(
             f"swift dependency {self.name!r} gives a url but no "
-            "'branch', 'from' or 'exact'"
+            "'branch', 'up_to_major' or 'exact'"
         )
 
     def relative_path(self, relative_to: Path | None) -> Path:
@@ -123,12 +149,12 @@ class SwiftDependency:
             spec["branch"] = self.branch
         elif self.exact:
             spec["exactVersion"] = self.exact
-        elif self.version_from:
-            spec["from"] = self.version_from
+        elif self.up_to_major:
+            spec["from"] = self.up_to_major
         else:
             raise SwiftConfigError(
                 f"swift dependency {self.name!r} gives a url but no "
-                "'branch', 'from' or 'exact'"
+                "'branch', 'up_to_major' or 'exact'"
             )
         return spec
 
@@ -147,6 +173,7 @@ class SwiftAppConfig:
     android_package: Path
     #: Absolute path of the desktop package (the one `swift run` builds).
     desktop_package: Path
+    #: NucleantUI first, then ``[[swift.dependencies]]``.
     dependencies: tuple[SwiftDependency, ...] = ()
     unsafe_flags: tuple[str, ...] = ()
     #: Environment for every Swift build of this app. Package.swift can only
@@ -207,10 +234,19 @@ def load_swift_config(
         if not src.is_dir():
             raise SwiftConfigError(f"[swift] sources: {src} is not a directory")
 
-    dependencies = tuple(
+    nucleantui = nucleantui_dependency(project_dir, data)
+    extra = tuple(
         _dependency(project_dir, entry)
         for entry in section.get("dependencies", []) or []
     )
+    for dep in extra:
+        if dep.identity == nucleantui.identity or dep.name.lower() == "nucleantui":
+            raise SwiftConfigError(
+                f"[[swift.dependencies]] lists {dep.name!r}, but NucleantUI is the "
+                "nucleantui bootstrap's own dependency: pick its version or fork "
+                "in [nucleantui] instead"
+            )
+    dependencies = (nucleantui, *extra)
 
     return SwiftAppConfig(
         project_dir=project_dir,
@@ -254,25 +290,63 @@ def _resolve(project_dir: Path, value: str) -> Path:
     return p if p.is_absolute() else (project_dir / p).resolve()
 
 
+def nucleantui_dependency(project_dir: Path, data: dict) -> SwiftDependency:
+    """NucleantUI, as ``[nucleantui]`` picks it (default: GitHub, branch master).
+
+    A fork keeps its own package name — its repository or directory name —
+    while the product stays ``NucleantUI``.
+    """
+    section: dict = data.get("nucleantui", {}) or {}
+    where = "[nucleantui]"
+    unknown = set(section) - {"url", "path", "from", *_VERSION_KEYS}
+    if unknown:
+        raise SwiftConfigError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}")
+    path = _dependency_path(project_dir, section, where)
+    versions = _versions(section, where)
+    if path is not None:
+        if section.get("url") or any(versions.values()):
+            raise SwiftConfigError(f"{where}: 'path' is a local fork and takes no url or version")
+        return SwiftDependency(name=path.name, path=path, products=(NUCLEANTUI_PRODUCT,))
+    if not any(versions.values()):
+        versions["branch"] = DEFAULT_NUCLEANTUI_BRANCH
+    url = section.get("url") or NUCLEANTUI_URL
+    name = url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git") or "NucleantUI"
+    return SwiftDependency(name=name, url=url, products=(NUCLEANTUI_PRODUCT,), **versions)
+
+
 def _dependency(project_dir: Path, entry: dict) -> SwiftDependency:
     name = entry.get("name")
     if not name:
         raise SwiftConfigError("[[swift.dependencies]] entry has no 'name'")
-
-    raw_path = entry.get("path")
-    path = _resolve(project_dir, raw_path) if raw_path else None
-    if path is not None and not path.is_dir():
-        raise SwiftConfigError(f"swift dependency {name!r}: path {path} does not exist")
-
+    where = f"swift dependency {name!r}"
+    path = _dependency_path(project_dir, entry, where)
     return SwiftDependency(
         name=name,
         path=path,
         url=entry.get("url"),
-        branch=entry.get("branch"),
-        version_from=entry.get("from"),
-        exact=entry.get("exact"),
         products=tuple(entry.get("products", []) or []),
+        **_versions(entry, where),
     )
+
+
+def _dependency_path(project_dir: Path, entry: dict, where: str) -> Path | None:
+    raw_path = entry.get("path")
+    path = _resolve(project_dir, raw_path) if raw_path else None
+    if path is not None and not path.is_dir():
+        raise SwiftConfigError(f"{where}: path {path} does not exist")
+    return path
+
+
+def _versions(entry: dict, where: str) -> dict[str, str | None]:
+    """``branch`` / ``up_to_major`` / ``exact``: at most one of them."""
+    if "from" in entry:
+        raise SwiftConfigError(f"{where}: 'from' is spelled 'up_to_major' in nucleant.toml")
+    given = {k: str(entry[k]) for k in _VERSION_KEYS if entry.get(k)}
+    if len(given) > 1:
+        raise SwiftConfigError(
+            f"{where}: give one of {', '.join(_VERSION_KEYS)}, not {' and '.join(given)}"
+        )
+    return {k: given.get(k) for k in _VERSION_KEYS}
 
 
 def is_foreign_package(package_dir: Path) -> bool:
