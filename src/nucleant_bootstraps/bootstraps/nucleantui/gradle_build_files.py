@@ -590,8 +590,7 @@ swiftTargets.forEach { (abi, triple) ->
         environment("PATH", File(swiftExecutable).parentFile?.let {
             it.absolutePath + File.pathSeparator + System.getenv("PATH")
         } ?: System.getenv("PATH"))
-        // nucleant.toml [swift.env] — e.g. NUCLEANT_LOCAL_DEV=1 for sibling
-        // checkouts, which every Nucleant Package.swift reads.
+        // nucleant.toml [swift.env]
 {extra_env}
     }
 

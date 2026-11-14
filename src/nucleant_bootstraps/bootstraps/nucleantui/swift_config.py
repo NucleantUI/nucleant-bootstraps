@@ -18,7 +18,7 @@ Example::
     android_package = "project_dist/gradle/swift"
 
     [swift.env]
-    # NUCLEANT_LOCAL_DEV = "1"
+    # NUCLEANT_ANDROID_USE_AHARDWAREBUFFER = "1"
 
     [[swift.dependencies]]
     name = "NucleantUI"
@@ -150,8 +150,8 @@ class SwiftAppConfig:
     dependencies: tuple[SwiftDependency, ...] = ()
     unsafe_flags: tuple[str, ...] = ()
     #: Environment for every Swift build of this app. Package.swift can only
-    #: read the environment, so choices made there — NUCLEANT_LOCAL_DEV, or
-    #: NUCLEANT_ANDROID_USE_AHARDWAREBUFFER — have to come in this way.
+    #: read the environment, so choices made there (such as
+    #: NUCLEANT_ANDROID_USE_AHARDWAREBUFFER) have to come in this way.
     env: tuple[tuple[str, str], ...] = ()
     macos_deployment: str = DEFAULT_MACOS_DEPLOYMENT
     ios_deployment: str = DEFAULT_IOS_DEPLOYMENT

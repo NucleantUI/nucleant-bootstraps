@@ -22,7 +22,7 @@ class Config:
     android = None
     apple = None
     python_enabled = False
-    data: dict = {"swift": {"env": {"NUCLEANT_LOCAL_DEV": "1"}}}
+    data: dict = {"swift": {"env": {"NUCLEANT_ANDROID_USE_AHARDWAREBUFFER": "1"}}}
 
 
 class Delegate:
@@ -42,7 +42,7 @@ def test_registry():
 def test_bootstrap_exposes_target_and_env():
     b = get_bootstrap("nucleantui", Config(), Delegate())
     assert b.app_target() == "App"
-    assert b.build_env() == {"NUCLEANT_LOCAL_DEV": "1"}
+    assert b.build_env() == {"NUCLEANT_ANDROID_USE_AHARDWAREBUFFER": "1"}
 
 
 def test_templates_carry_a_version():
