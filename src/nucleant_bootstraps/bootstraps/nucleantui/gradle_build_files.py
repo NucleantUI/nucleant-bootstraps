@@ -607,6 +607,16 @@ swiftTargets.forEach { (abi, triple) ->
             include("**/*.resources/**")
         }
         into(generatedAssetsDir)
+        // SwiftPM copies resources out of the read-only git checkouts as they
+        // are, and Copy keeps that: the next copy over them fails with
+        // "Permission denied" once a resource changes. So the staged copies
+        // are made writable, and read-only ones an earlier build left are
+        // removed first.
+        filePermissions { user { read = true; write = true } }
+        doFirst {
+            generatedAssetsDir.listFiles { file -> file.name.endsWith(".resources") }
+                ?.forEach { it.deleteRecursively() }
+        }
     }
 
     val stage = tasks.register<Copy>("stageSwift_$abi") {
