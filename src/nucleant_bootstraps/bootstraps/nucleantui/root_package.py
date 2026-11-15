@@ -165,6 +165,8 @@ class RootTarget:
     products: tuple[tuple[str, str], ...]
     #: Dependencies on other targets of the root package, by name.
     local: tuple[str, ...]
+    #: Absolute paths of its `.embedInCode` resources.
+    embedded: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -268,12 +270,18 @@ def parse_dump(root: Path, data: dict) -> RootPackage:
             elif "target" in dep:
                 local.append(dep["target"][0])
         rel = t.get("path") or f"Sources/{t['name']}"
+        embedded = tuple(
+            (root / rel / r["path"]).resolve()
+            for r in t.get("resources", [])
+            if "embedInCode" in (r.get("rule") or {})
+        )
         targets[t["name"]] = RootTarget(
             name=t["name"],
             type=t.get("type", "regular"),
             path=(root / rel).resolve(),
             products=tuple(products),
             local=tuple(local),
+            embedded=embedded,
         )
 
     products = {p["name"]: next(iter(p.get("type", {"library": None}))) for p in data.get("products", [])}
