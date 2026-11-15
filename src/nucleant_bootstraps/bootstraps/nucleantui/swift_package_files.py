@@ -36,26 +36,27 @@ lifecycle work lives in NucleantApplication — ``Platform_Android``'s
 ``AndroidSurfaceBridge``, next to the ``AndroidSurfaceHost`` it drives, with the
 ``CAndroidNativeWindow`` shim beside it. What is generated is:
 
-* ``Package.swift`` — swift-java plus whatever the project declared;
-* ``NucleantMain.swift`` — one-line forwards into that bridge, which exist only
+* ``Package.swift`` — swift-java, and the project's own package by path
+  (``.package(path: "../../..")``). Every other dependency comes through that
+  package, declared and versioned there; nothing is repeated here;
+* ``AppMain.swift`` — one-line forwards into that bridge, which exist only
   because jextract reads *syntax* and so generates Java for the ``public func``s
   in the target its plugin is attached to;
 * ``swift-java.config`` — the fixed ``org.nucleantui`` package and JNI mode.
 
-The app's own Swift is copied in verbatim. Nothing rewrites it: an earlier
-version stripped a top-level ``@main``, believing the attribute illegal in a
-library target. It is not — SwiftPM infers an executable from a file *named*
-``main.swift``, not from the attribute — so ``@main struct MyApp: NucleantApp``
-is one spelling that serves desktop and Android alike.
+The app's own Swift is not copied: it is the root package's ``[swift] target``,
+which that package declares as a library when ``ANDROID_BUILD`` is set (Gradle
+sets it). Its ``@main struct MyApp: NucleantApp`` stays as it is — SwiftPM
+infers an executable from a file *named* ``main.swift``, not from the
+attribute — and is public, so ``AppMain`` can construct it.
 """
 
 from __future__ import annotations
 
-import os.path
 import shutil
 from pathlib import Path
 
-from .swift_config import GENERATED_MARKER, SwiftAppConfig, SwiftConfigError
+from .swift_config import GENERATED_MARKER, SwiftAppConfig, portable_relpath
 
 # swift-java, pinned rather than floored. 0.1.2 introduced the `SwiftJava`
 # product name and jextract's `"mode": "jni"` config, but does not compile on
@@ -95,7 +96,8 @@ SWIFT_PRODUCT_NAME = "NucleantMain"
 # before. Same fixed identity as `org.libsdl.app`.
 JAVA_PACKAGE = "org.nucleantui"
 
-# Where the app's own Swift is copied to inside the generated target.
+# Where earlier versions copied the app's own Swift inside the generated
+# target; removed on regenerate (see _remove_stale_bridge_sources).
 APP_SOURCES_SUBDIR = "App"
 
 
@@ -106,7 +108,7 @@ def write_swift_package(
     """Materialize the Main Swift Package at ``swift_dir``.
 
     When the project already has a ``Package.swift`` there, that manifest is
-    left alone — ``swift_main`` pointed at a package the project owns, and
+    left alone — ``android_package`` pointed at a package the project owns, and
     overwriting it would discard hand-written targets. The bridge sources are
     still refreshed into it, because those are the half this bootstrap is
     responsible for and they have to match the Java it also generates.
@@ -124,7 +126,6 @@ def write_swift_package(
 
     _write_swift_java_config(target_dir)
     _write_nucleant_main_swift(target_dir, config)
-    _copy_app_sources(target_dir, config)
     _remove_stale_bridge_sources(swift_dir, target_dir)
 
 
@@ -134,23 +135,8 @@ def write_swift_package(
 
 
 def _write_package_swift(swift_dir: Path, config: SwiftAppConfig) -> None:
-    """Emit Package.swift: swift-java, plus whatever the project declared."""
-    package_deps = [
-        f'        .package(url: "https://github.com/swiftlang/swift-java", from: "{SWIFT_JAVA_VERSION}"),'
-    ]
-    target_deps = [
-        '                .product(name: "SwiftJava", package: "swift-java"),',
-    ]
-    for dep in config.dependencies:
-        package_deps.append(f"        {dep.as_package_dependency(swift_dir)},")
-        for product in dep.as_target_dependencies():
-            target_deps.append(f"                {product},")
-
-    unsafe = ""
-    if config.unsafe_flags:
-        flags = ", ".join(f'"{f}"' for f in config.unsafe_flags)
-        unsafe = f"\n                .unsafeFlags([{flags}]),"
-
+    """Emit Package.swift: swift-java, and the project's package by path."""
+    root = portable_relpath(config.root_package, swift_dir)
     content = f"""\
 // swift-tools-version: 6.2
 //
@@ -161,11 +147,11 @@ def _write_package_swift(swift_dir: Path, config: SwiftAppConfig) -> None:
 // jniLibs/<abi>/ and the jextract-generated Java lands in the app's java source
 // set. Treat it as generated output — regenerating overwrites it.
 //
-// This is the whole native side of the app: the app's own Swift (under
-// Sources/{SWIFT_TARGET_NAME}/{APP_SOURCES_SUBDIR}/), the framework it is written against, and the
-// JNI edge the Activity calls. One binary, so the surface hooks in
-// Platform_Android are reached as ordinary Swift calls rather than through a
-// dlsym'd C ABI.
+// It adds only the JNI edge the Activity calls to the app. The app itself —
+// its Swift and every package it uses — is the project's own Package.swift
+// ({root}), linked here as the `{config.target}` library: Gradle builds with
+// ANDROID_BUILD=1, and that package declares the library under it. Change
+// dependencies there, not here.
 
 import PackageDescription
 
@@ -182,20 +168,22 @@ let package = Package(
         )
     ],
     dependencies: [
-{chr(10).join(package_deps)}
+        .package(url: "https://github.com/swiftlang/swift-java", from: "{SWIFT_JAVA_VERSION}"),
+        .package(path: "{root}"),
     ],
     targets: [
         .target(
             name: "{SWIFT_TARGET_NAME}",
             dependencies: [
-{chr(10).join(target_deps)}
+                .product(name: "SwiftJava", package: "swift-java"),
+                .product(name: "{config.target}", package: "{config.root_identity}"),
             ],
             swiftSettings: [
-                .swiftLanguageMode(.v5),{unsafe}
+                .swiftLanguageMode(.v5),
             ],
             plugins: [
                 // Generates the Java class the Activity calls, plus the JNI
-                // glue that lands in lib{SWIFT_TARGET_NAME}.so. Configured by
+                // glue that lands in lib{SWIFT_PRODUCT_NAME}.so. Configured by
                 // Sources/{SWIFT_TARGET_NAME}/swift-java.config.
                 .plugin(name: "JExtractSwiftPlugin", package: "swift-java")
             ]
@@ -249,6 +237,11 @@ def _remove_stale_bridge_sources(swift_dir: Path, target_dir: Path) -> None:
         path = target_dir / stale
         if path.is_file():
             path.unlink()
+    # The app's Swift used to be copied in here; it is the root package's own
+    # target now, and a leftover copy would define every type twice.
+    copied_app = target_dir / APP_SOURCES_SUBDIR
+    if copied_app.is_dir():
+        shutil.rmtree(copied_app)
     # The target was called NucleantMain before the Java edge moved into
     # NucleantApplication; its old directory would otherwise stay in Sources/
     # with a duplicate copy of the app's own Swift beside it.
@@ -258,44 +251,6 @@ def _remove_stale_bridge_sources(swift_dir: Path, target_dir: Path) -> None:
             path = legacy_target / orphan
             if path.is_file():
                 path.unlink()
-
-
-# ---------------------------------------------------------------------------
-# The app's own Swift
-# ---------------------------------------------------------------------------
-
-
-def _copy_app_sources(target_dir: Path, config: SwiftAppConfig) -> None:
-    """Copy the project's Swift into the generated target.
-
-    Copied rather than referenced: SwiftPM will not take sources from outside
-    the package directory, and a symlink out of a generated tree breaks as soon
-    as the project moves. The destination is wiped first so a source deleted in
-    the project does not survive in the build.
-
-    Copied *verbatim*. An earlier version rewrote a top-level ``@main`` into a
-    comment, on the belief that the attribute is legal only in an executable and
-    so would fail in this library target. It does not: a package whose only
-    product is a `.library` builds fine with a `@main` type — what SwiftPM infers
-    an executable from is a file *named* ``main.swift``, which is also the real
-    source of the "library product should not contain executable targets" error.
-    So an app's ``@main struct MyApp: NucleantApp`` is one portable spelling —
-    the entry point on macOS and Linux, an unused static member here — and
-    nothing needs to edit the author's code on the way into the build.
-    """
-    dest = target_dir / APP_SOURCES_SUBDIR
-    if dest.exists():
-        shutil.rmtree(dest)
-    if not config.sources:
-        return
-    dest.mkdir(parents=True, exist_ok=True)
-
-    for src in config.sources:
-        for item in src.rglob("*.swift"):
-            relative = item.relative_to(src)
-            target = dest / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target)
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +270,10 @@ def _copy_app_sources(target_dir: Path, config: SwiftAppConfig) -> None:
 
 
 def _write_nucleant_main_swift(target_dir: Path, config: SwiftAppConfig) -> None:
-    # The entry names types from the app's framework — the `NucleantApp`
-    # conformer and the `AppRuntime` that drives it — so each configured
-    # product is imported by name.
-    product_imports = "".join(
-        f"import {product}\n"
-        for dep in config.dependencies
-        for product in dep.product_names
-    )
+    # The entry names the app's `NucleantApp` conformer, from the app's own
+    # module, and the `AppRuntime` that drives it, from NucleantUI — which
+    # comes in through the app's package.
+    product_imports = f"import NucleantUI\nimport {config.target}\n"
     if config.has_app:
         body = f"""\
     // Deliberately *not* `{config.entry}.main()`, even though the app type
@@ -408,102 +359,3 @@ public func nucleantRunMain(appPath: String) -> Int32 {{
     content = content.replace("{product_imports}", product_imports)
     content = content.replace("{body}", body)
     (target_dir / f"{SWIFT_TARGET_NAME}.swift").write_text(content, encoding="utf-8")
-
-
-# ---------------------------------------------------------------------------
-# The desktop package — what `swift run` builds on macOS and Linux
-# ---------------------------------------------------------------------------
-
-
-def write_desktop_package(config: SwiftAppConfig) -> Path:
-    """Write the project's own ``Package.swift``: one executable target over
-    the app's sources, depending on what nucleant.toml declares.
-
-    This is the package an editor opens and ``swift run`` builds, so the same
-    ``@main struct …: NucleantApp`` is the entry point on macOS and Linux that
-    the Android Activity and the Xcode app start.
-
-    Left alone when the manifest is the project's own (no marker), exactly as
-    the Android package is.
-    """
-    package_dir = config.desktop_package
-    if config.desktop_package_is_foreign:
-        print(
-            f"[nucleant] {package_dir / 'Package.swift'} is the project's own "
-            "(no generated marker) — leaving it as it is."
-        )
-        return package_dir
-
-    if not config.sources:
-        raise SwiftConfigError(
-            "nucleant.toml [swift] has no sources, so there is nothing for the "
-            "desktop package to build."
-        )
-    if len(config.sources) > 1:
-        print(
-            "[nucleant] [swift] sources lists more than one directory; the "
-            f"desktop package builds only the first ({config.sources[0]})."
-        )
-    rel = Path(os.path.relpath(config.sources[0], package_dir))
-    if rel.parts and rel.parts[0] == "..":
-        raise SwiftConfigError(
-            f"[swift] sources: {config.sources[0]} is outside {package_dir}, and "
-            "SwiftPM only builds sources inside the package directory. Move them "
-            "under the project, or point [swift] package at a Package.swift of "
-            "your own."
-        )
-
-    package_deps = [
-        f"        {dep.as_package_dependency(package_dir)}," for dep in config.dependencies
-    ]
-    target_deps = [
-        f"                {product},"
-        for dep in config.dependencies
-        for product in dep.as_target_dependencies()
-    ]
-    settings = ""
-    if config.unsafe_flags:
-        flags = ", ".join(f'"{f}"' for f in config.unsafe_flags)
-        settings = f",\n            swiftSettings: [.unsafeFlags([{flags}])]"
-
-    nl = "\n"
-    content = f"""\
-// swift-tools-version: 6.2
-//
-// {GENERATED_MARKER}
-//
-// The app's desktop package — generated by nucleant from nucleant.toml, and
-// rewritten on every `nucleant` run. `nucleant macos run` and
-// `nucleant linux run` build it with `swift run`.
-//
-// Change dependencies in nucleant.toml, not here: the same list feeds the
-// Android Main Swift Package and the Xcode project. Delete the marker line
-// above to make this file your own; nucleant then leaves it alone.
-
-import PackageDescription
-
-let package = Package(
-    name: "{config.target}",
-    platforms: [.macOS("{config.macos_deployment}"), .iOS("{config.ios_deployment}")],
-    products: [
-        .executable(name: "{config.target}", targets: ["{config.target}"])
-    ],
-    dependencies: [
-{nl.join(package_deps)}
-    ],
-    targets: [
-        .executableTarget(
-            name: "{config.target}",
-            dependencies: [
-{nl.join(target_deps)}
-            ],
-            path: "{rel.as_posix()}"{settings}
-        )
-    ]
-)
-"""
-    package_dir.mkdir(parents=True, exist_ok=True)
-    manifest = package_dir / "Package.swift"
-    if not manifest.is_file() or manifest.read_text(encoding="utf-8") != content:
-        manifest.write_text(content, encoding="utf-8")
-    return package_dir

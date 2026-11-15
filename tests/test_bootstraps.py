@@ -64,9 +64,9 @@ def test_swift_config_defaults(tmp_path: Path):
     swift = load_swift_config(tmp_path, {}, "My App")
     assert swift.target == "MyApp"
     assert swift.entry is None and not swift.has_app
-    assert swift.sources == ()
     assert swift.android_package == tmp_path.resolve() / "project_dist/gradle/swift"
-    assert swift.desktop_package == tmp_path.resolve()
+    assert swift.root_package == tmp_path.resolve()
+    assert swift.root_identity == tmp_path.name.lower()
 
 
 def test_names():

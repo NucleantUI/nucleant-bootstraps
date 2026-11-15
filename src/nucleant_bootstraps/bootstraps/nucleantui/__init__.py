@@ -7,10 +7,12 @@ each platform through the native project that platform builds from:
   ``swift run``;
 * **android**: a Gradle project whose ``MainActivity`` extends
   NucleantApplication's ``NucleantActivity``, and a Main Swift Package Gradle
-  cross-compiles per ABI;
-* **apple**: an XcodeGen project for iOS and the macOS ``.app``.
+  cross-compiles per ABI, which depends on the project's package by path;
+* **apple**: an XcodeGen project for iOS and the macOS ``.app``, compiling the
+  app's target with the packages it uses there.
 
-All three are written from the same ``[swift]`` table of nucleant.toml. The
+The project's ``Package.swift`` is the one place the app's Swift is described.
+``nucleant init`` writes a starter one; nothing rewrites it. The
 rendering itself is Vulkan on a surface the platform's own view class hosts —
 CAMetalLayer on Apple, a SurfaceView on Android — with no SDL in between.
 
@@ -28,8 +30,8 @@ from .gradle_build_files import (
     DEFAULT_ANDROID_MANIFEST_TEMPLATE,
     DEFAULT_BUILD_GRADLE_TEMPLATE,
 )
+from .root_package import require_root_package, write_root_package
 from .swift_config import SwiftAppConfig, load_swift_config
-from .swift_package_files import write_desktop_package
 
 ANDROID_TEMPLATE_FILES = {
     "build.tmpl.gradle.kts": DEFAULT_BUILD_GRADLE_TEMPLATE,
@@ -66,7 +68,11 @@ class NucleantUIBootstrap:
         delegate = self.delegate
         match platform:
             case "desktop":
-                return write_desktop_package(self.swift)
+                # `swift run` builds the project's own package; only a project
+                # without one (a fresh `nucleant init`) gets the starter.
+                if kw.get("init"):
+                    return write_root_package(self.swift)
+                return require_root_package(self.swift)
             case "android":
                 if not isinstance(delegate, GradleProjectDelegate):
                     raise TypeError("android generation needs a GradleProjectDelegate")
