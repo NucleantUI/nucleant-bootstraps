@@ -19,7 +19,8 @@ from pathlib import Path
 from ...bootstrap import GradleProjectDelegate
 from ...config_models import AndroidProtocol, NucleantTomlProtocol
 from .gradle_build_files import GradleBuildFiles
-from .swift_config import SwiftAppConfig
+from .root_package import RootPackage, dump_root_package
+from .swift_config import SwiftAppConfig, SwiftConfigError
 from .swift_package_files import write_swift_package
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -107,13 +108,16 @@ class NucleantUIGradleBuilder:
         api = android.api or delegate.default_api_version
         min_sdk = android.min_api or 28
 
-        # The Main Swift Package is written before the Gradle files that build
-        # it, so a first `nucleant android run` needs no separate step.
-        write_swift_package(swift.android_package, swift)
-
         # nucleant.toml [swift.env] plus whatever the CLI adds for every Swift
         # build (the CLI's values win: they describe the resolved toolchain).
         swift_env = {**swift.env_dict, **delegate.swift_env}
+
+        # The project's Package.swift, as Gradle's `swift build` will see it.
+        root = self._android_root_package(swift_env)
+
+        # The Main Swift Package is written before the Gradle files that build
+        # it, so a first `nucleant android run` needs no separate step.
+        write_swift_package(swift.android_package, swift)
 
         GradleBuildFiles.write_app_build_gradle(
             project_dir=self.working_dir,
@@ -131,8 +135,8 @@ class NucleantUIGradleBuilder:
             version_name=android.version_name,
             post_build=android.post_build,
             swift_main=swift.android_package,
-            native_lib_dirs=_vendored_native_roots(swift),
-            nucleant_java_dir=_nucleant_java_root(swift),
+            native_lib_dirs=_vendored_native_roots(root),
+            nucleant_java_dir=_nucleant_java_root(root),
             swift_env=tuple(swift_env.items()),
             python_enabled=python_enabled,
             python_version=delegate.py_version if python_enabled else "3.13",
@@ -199,6 +203,30 @@ class NucleantUIGradleBuilder:
         print("    and the vendored native libraries, staged at build time")
         return dist_dir
 
+    def _android_root_package(self, swift_env: dict[str, str]) -> RootPackage:
+        """The root Package.swift evaluated with Gradle's environment, checked
+        for the one thing the Android package needs from it: a library product
+        named after ``[swift] target``."""
+        swift = self.swift
+        root = dump_root_package(
+            swift,
+            self.delegate.swift_executable,
+            {**swift_env, "ANDROID_BUILD": "1"},
+        )
+        kind = root.products.get(swift.target)
+        if kind != "library":
+            found = f"a {kind} product" if kind else "no product"
+            raise SwiftConfigError(
+                f"{swift.root_manifest} has {found} named {swift.target!r} when "
+                "ANDROID_BUILD is set. The Android package links the app as a "
+                f"library, so declare it as one there:\n"
+                f'    .library(name: "{swift.target}", targets: ["{swift.target}"])\n'
+                f'    .target(name: "{swift.target}", ...)  // not .executableTarget\n'
+                "under `ANDROID_BUILD` — the Package.swift `nucleant init` writes "
+                "shows how."
+            )
+        return root
+
     def _write_presplash(
         self, res_dir: Path, merged_deps: list[str]
     ) -> tuple[str | None, str | None]:
@@ -257,7 +285,7 @@ def _merge_unique(base: list[str], extra: list[str]) -> list[str]:
     return list(dict.fromkeys(base + extra))
 
 
-def _nucleant_java_root(swift: SwiftAppConfig) -> Path | None:
+def _nucleant_java_root(root: RootPackage) -> Path | None:
     """NucleantApplication's ``Android/java``, if a local checkout has it.
 
     ``NucleantActivity`` and ``NucleantSurfaceView`` ship from there rather than
@@ -266,37 +294,36 @@ def _nucleant_java_root(swift: SwiftAppConfig) -> Path | None:
     app-specific. Gradle compiles them straight out of the checkout, so there is
     one copy and an edit in NucleantApplication needs no regenerate.
 
-    Found beside a declared path dependency (true in a development tree, where
-    NucleantUI and NucleantApplication are siblings). A package resolved from
-    git is found by Gradle instead, under the scratch path's checkouts — which
-    do not exist yet when this runs.
+    Found beside a path dependency of the project's Package.swift (true in a
+    development tree, where NucleantUI and NucleantApplication are siblings). A
+    package resolved from git is found by Gradle instead, under the scratch
+    path's checkouts — which do not exist yet when this runs.
     """
-    for dep in swift.dependencies:
-        if dep.path is None:
-            continue
-        for candidate in (dep.path, dep.path.parent / "NucleantApplication"):
+    for path in root.path_dependencies:
+        for candidate in (path, path.parent / "NucleantApplication"):
             java = candidate / "Android" / "java"
             if (java / "org" / "nucleantui" / "NucleantActivity.java").is_file():
                 return java
     return None
 
 
-def _vendored_native_roots(swift: SwiftAppConfig) -> list[Path]:
+def _vendored_native_roots(root: RootPackage) -> list[Path]:
     """Directories holding vendored Android .so files the Swift graph links.
 
     ``libNucleantMain.so`` needs ThorVG, wgpu, shaderc and spirv-cross at
     runtime, and none of them belong to the package the project names — they
     come from further down the Swift dependency tree. Every Nucleant package
     keeps its Android artifacts at ``Dependencies/android/<abi>/lib``, so the
-    siblings of a declared path dependency are the place to look. (Packages
-    resolved from git are scanned by Gradle under the scratch checkouts.)
+    siblings of a path dependency of the project's Package.swift are the place
+    to look. (Packages resolved from git are scanned by Gradle under the
+    scratch checkouts.)
     """
     roots: list[Path] = []
     seen: set[Path] = set()
-    for dep in swift.dependencies:
-        if dep.path is None:
+    for path in root.path_dependencies:
+        if not path.is_dir():
             continue
-        for candidate in [dep.path, *sorted(dep.path.parent.iterdir())]:
+        for candidate in [path, *sorted(path.parent.iterdir())]:
             if not candidate.is_dir():
                 continue
             android = candidate / "Dependencies" / "android"

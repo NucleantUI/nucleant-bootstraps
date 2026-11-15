@@ -3,8 +3,9 @@
 Xcode is only needed where ``swift run`` cannot go: iOS (device and
 simulator), and macOS as a proper signed ``.app`` for the App Store. The
 project is one multi-platform app target that compiles the app's Swift sources
-where they are and depends on the packages nucleant.toml declares — the shape
-of NucleantUI's own ``Examples/xcode/project.yml``. Its ``@main …: NucleantApp``
+where they are and depends on the packages the app's target uses in the
+project's own Package.swift (read back with ``swift package dump-package``) —
+the shape of NucleantUI's own ``Examples/xcode/project.yml``. Its ``@main …: NucleantApp``
 is the entry point on both platforms; UIKit's scene manifest without a delegate
 class lets NucleantUI's launch delegate answer.
 """
@@ -19,6 +20,7 @@ import yaml
 
 from ...bootstrap import XcodeProjectDelegate
 from ...config_models import NucleantTomlProtocol
+from .root_package import RootPackage, RootTarget, dump_root_package
 from .spec_merge import merge_user_spec
 from .swift_config import SwiftAppConfig
 
@@ -90,6 +92,33 @@ class NucleantUIXcodeBuilder:
         self.ios = apple.ios
         self.macos = apple.macos
         self.app_name = config.app_name
+        self._root: RootPackage | None = None
+
+    @property
+    def root(self) -> RootPackage:
+        """The project's Package.swift, as SwiftPM evaluates it for Apple."""
+        if self._root is None:
+            env = {**self.swift.env_dict, **self.delegate.swift_env}
+            self._root = dump_root_package(self.swift, self.delegate.swift_executable, env)
+        return self._root
+
+    @property
+    def app_target(self) -> RootTarget:
+        target = self.root.target(self.swift.target)
+        if target.local:
+            print(
+                f"[nucleant] {self.swift.target} depends on other targets of its own "
+                f"package ({', '.join(target.local)}); the Xcode project compiles "
+                "only its own sources, so those are not in it."
+            )
+        return target
+
+    def _packages(self) -> dict[str, dict]:
+        """XcodeGen ``packages:``, keyed by the name the target refers to them by."""
+        return {
+            package: self.root.dependency(package).as_xcodegen_package(self.project_dir)
+            for _, package in self.app_target.products
+        }
 
     @property
     def project_dir(self) -> Path:
@@ -115,10 +144,7 @@ class NucleantUIXcodeBuilder:
 
     def _target(self) -> dict[str, Any]:
         swift = self.swift
-        if not swift.sources:
-            raise XcodeBuilderError(
-                "nucleant.toml [swift] has no sources for the Xcode app target"
-            )
+        app = self.app_target
         bundle_id, mac_bundle_id = self._bundle_ids()
         team = (self.ios.developer_team if self.ios else None) or (
             self.macos.developer_team if self.macos else None
@@ -164,19 +190,14 @@ class NucleantUIXcodeBuilder:
         }
         if mac_bundle_id:
             settings["PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]"] = mac_bundle_id
-        if swift.unsafe_flags:
-            settings["OTHER_SWIFT_FLAGS"] = ["$(inherited)", *swift.unsafe_flags]
 
         target: dict[str, Any] = {
             "type": "application",
             "platform": "auto",
             "supportedDestinations": destinations,
-            "sources": [{"path": self._rel(s)} for s in swift.sources]
-            + [{"path": "Support/BundleModule.swift"}],
+            "sources": [{"path": self._rel(app.path)}, {"path": "Support/BundleModule.swift"}],
             "dependencies": [
-                {"package": dep.name, "product": product}
-                for dep in swift.dependencies
-                for product in dep.product_names
+                {"package": package, "product": product} for product, package in app.products
             ],
             "settings": {"base": settings},
             "info": {"path": "Support/Info.plist", "properties": info},
@@ -239,10 +260,7 @@ class NucleantUIXcodeBuilder:
                 "bundleIdPrefix": prefix,
                 "deploymentTarget": deployment,
             },
-            "packages": {
-                dep.name: dep.as_xcodegen_package(self.project_dir)
-                for dep in swift.dependencies
-            },
+            "packages": self._packages(),
             "settings": {
                 "base": {
                     "SWIFT_VERSION": "6.0",
