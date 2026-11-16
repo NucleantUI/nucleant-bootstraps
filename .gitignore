@@ -68,3 +68,6 @@ __pycache__/
 *.egg-info/
 dist/
 .pytest_cache/
+
+# Like Package.resolved: each checkout resolves its own.
+uv.lock
