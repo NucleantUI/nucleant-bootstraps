@@ -174,10 +174,10 @@ android {
             java.srcDir(swiftGeneratedJavaDir)
             java.srcDir(nucleantBridgeJavaDir)
             java.srcDir(swiftKitCoreJavaDir)
-            // org.nucleantui.NucleantActivity / NucleantSurfaceView ship with
-            // NucleantApplication (Android/java), the Java half of its
-            // AndroidSurfaceBridge. Compiled from the checkout, so there is
-            // one copy of it.
+            // The Swift packages' own Java, from each one's Android/java:
+            // NucleantApplication's NucleantActivity and NucleantSurfaceView,
+            // and whatever Java any other package's Swift calls into. Staged
+            // from the packages the Swift build resolved.
             java.srcDir(nucleantJavaDir){{ python_source_sets }}
         }
     }
@@ -390,7 +390,6 @@ include(":app")
         swift_main: Path | None = None,
         native_lib_dirs: list[Path] | None = None,
         swift_env: tuple[tuple[str, str], ...] = (),
-        nucleant_java_dir: Path | None = None,
         python_enabled: bool = False,
         python_version: str = "3.13",
         byte_compile_python: bool = True,
@@ -427,9 +426,7 @@ include(":app")
                 "SDK's floor; the Swift libraries are built for API 28 and will "
                 "not load on older devices. Set min_api = 28."
             )
-        swift_config = GradleBuildFiles._swift_runtime_config(
-            swift_main, nucleant_java_dir
-        )
+        swift_config = GradleBuildFiles._swift_runtime_config(swift_main)
         build_tasks = GradleBuildFiles._swift_runtime_tasks(arch_values)
         build_tasks += GradleBuildFiles._swift_build_tasks(
             arch_values, swift_main, min_sdk, native_lib_dirs, swift_env
@@ -649,10 +646,31 @@ tasks.named("preBuild") {
     dependsOn(buildSwiftAll)
 }
 
+/**
+ * The Swift packages' Android/java, into nucleantJavaDir (see there). After the
+ * Swift build, which has resolved the packages by then. A Sync, so Java from a
+ * package that left the graph goes with it.
+ */
+val stagePackageJava = tasks.register<Sync>("stagePackageJava") {
+    group = "swift"
+    description = "Stage the Swift packages' Android/java for javac"
+    dependsOn(buildSwiftAll)
+    from(provider {
+        swiftPackageDirs().map { File(it, "Android/java") }.filter { it.isDirectory }
+    })
+    into(nucleantJavaDir)
+    // Git checkouts are read-only and a copy keeps that, so the next sync could
+    // not replace what it staged.
+    filePermissions { user { read = true; write = true } }
+    dirPermissions { user { read = true; write = true; execute = true } }
+    // The same class from two packages is a mistake to stop at, not to pick from.
+    duplicatesStrategy = DuplicatesStrategy.FAIL
+}
+
 // The Java bridge does not exist until jextract has run, so compiling it has to
 // wait for the Swift build rather than merely for the source set to be declared.
 tasks.withType<JavaCompile>().configureEach {
-    dependsOn(buildSwiftAll)
+    dependsOn(buildSwiftAll, stagePackageJava)
     // Two of swiftkit-core's annotations are documented with JDK Flight
     // Recorder metadata (jdk.jfr), which Android's class library does not have.
     // They carry no behaviour, and the generated code imports the package by
@@ -674,10 +692,7 @@ tasks.configureEach {
         ).replace("{vendored}", vendored).replace("{extra_env}", extra_env)
 
     @staticmethod
-    def _swift_runtime_config(
-        swift_main: Path | None = None,
-        nucleant_java_dir: Path | None = None,
-    ) -> str:
+    def _swift_runtime_config(swift_main: Path | None = None) -> str:
         """Locates the installed Swift Android SDK.
 
         The app compiles no Swift, but it packages Swift libraries — the
@@ -690,7 +705,6 @@ tasks.configureEach {
         precede the tasks that use it.
         """
         main_dir = swift_main.as_posix() if swift_main else ""
-        java_dir = nucleant_java_dir.as_posix() if nucleant_java_dir else ""
         return """\
 // ── Swift runtime ────────────────────────────────────────────────────────────
 // Where the toolchain, the Swift SDK and the generated sources are. The Main
@@ -767,14 +781,42 @@ val nucleantBridgeJavaDir = provider {
 }
 
 /**
- * NucleantApplication's Android/java: org.nucleantui.NucleantActivity and
- * NucleantSurfaceView. A local checkout found at generation time wins; a
- * package resolved from git is in the scratch path's checkouts.
+ * The Java half of the Swift packages, compiled with the app: the `Android/java`
+ * of every package in the Swift graph that has one. NucleantApplication's is
+ * org.nucleantui.NucleantActivity and NucleantSurfaceView; others carry the
+ * Java their Swift calls into (Android callback classes Swift cannot subclass).
+ *
+ * `stagePackageJava` fills it after the Swift build, from the packages SwiftPM
+ * resolved for it, so the Java is always the same checkout as the Swift built
+ * next to it. A fixed directory, because AGP reads the source sets before any
+ * task has run.
  */
-val nucleantJavaDir = provider {
-    val local = "{nucleant_java_dir}"
-    if (local.isNotEmpty() && File(local).isDirectory) File(local)
-    else File(swiftScratch, "checkouts/NucleantApplication/Android/java")
+val nucleantJavaDir = layout.buildDirectory.dir("generated/packageJava").get().asFile
+
+/**
+ * Every package SwiftPM resolved for the Main Swift Package, as a directory: a
+ * git checkout under the scratch path, or a local path package where it is.
+ * Read from SwiftPM's own record of the graph (workspace-state.json), so it is
+ * exactly what the Swift build used. Empty before the first resolve.
+ */
+@Suppress("UNCHECKED_CAST")
+fun swiftPackageDirs(): List<File> {
+    val state = File(swiftScratch, "workspace-state.json")
+    if (!state.isFile) return emptyList()
+    val workspace = groovy.json.JsonSlurper().parse(state) as Map<String, Any?>
+    val dependencies = (workspace["object"] as? Map<String, Any?>)
+        ?.get("dependencies") as? List<Map<String, Any?>>
+        ?: return emptyList()
+    return dependencies.mapNotNull { dependency ->
+        val packageState = dependency["state"] as? Map<String, Any?> ?: return@mapNotNull null
+        val subpath = dependency["subpath"] as? String ?: return@mapNotNull null
+        val path = packageState["path"] as? String
+        when (packageState["name"]) {
+            "fileSystem" -> path?.let(::File)
+            "edited" -> path?.let(::File) ?: File(swiftMainDir, "Packages/$subpath")
+            else -> File(swiftScratch, "checkouts/$subpath")
+        }
+    }
 }
 
 /**
@@ -833,7 +875,7 @@ fun swiftSdkBundle(): File {
 val swiftSdkBundleProvider = providers.provider { swiftSdkBundle() }
 // ─────────────────────────────────────────────────────────────────────────────""".replace("{swift_main}", main_dir).replace(
             "{swift_target}", SWIFT_TARGET_NAME
-        ).replace("{nucleant_java_dir}", java_dir)
+        )
 
     @staticmethod
     def _swift_runtime_tasks(arch_values: list[str]) -> str:

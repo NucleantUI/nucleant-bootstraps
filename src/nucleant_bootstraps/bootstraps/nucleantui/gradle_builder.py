@@ -136,7 +136,6 @@ class NucleantUIGradleBuilder:
             post_build=android.post_build,
             swift_main=swift.android_package,
             native_lib_dirs=_vendored_native_roots(root),
-            nucleant_java_dir=_nucleant_java_root(root),
             swift_env=tuple(swift_env.items()),
             python_enabled=python_enabled,
             python_version=delegate.py_version if python_enabled else "3.13",
@@ -283,28 +282,6 @@ class NucleantUIGradleBuilder:
 def _merge_unique(base: list[str], extra: list[str]) -> list[str]:
     """Merge two lists preserving order and removing duplicates."""
     return list(dict.fromkeys(base + extra))
-
-
-def _nucleant_java_root(root: RootPackage) -> Path | None:
-    """NucleantApplication's ``Android/java``, if a local checkout has it.
-
-    ``NucleantActivity`` and ``NucleantSurfaceView`` ship from there rather than
-    being generated: they are the Java half of a contract whose Swift half
-    (``AndroidSurfaceBridge``) is in the same package, and nothing about them is
-    app-specific. Gradle compiles them straight out of the checkout, so there is
-    one copy and an edit in NucleantApplication needs no regenerate.
-
-    Found beside a path dependency of the project's Package.swift (true in a
-    development tree, where NucleantUI and NucleantApplication are siblings). A
-    package resolved from git is found by Gradle instead, under the scratch
-    path's checkouts — which do not exist yet when this runs.
-    """
-    for path in root.path_dependencies:
-        for candidate in (path, path.parent / "NucleantApplication"):
-            java = candidate / "Android" / "java"
-            if (java / "org" / "nucleantui" / "NucleantActivity.java").is_file():
-                return java
-    return None
 
 
 def _vendored_native_roots(root: RootPackage) -> list[Path]:

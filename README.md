@@ -19,8 +19,10 @@ the pyproject.toml model were left behind.
 - **desktop** — the project's `Package.swift` (one executable target over the
   app's sources), for `swift run` on macOS and Linux;
 - **android** — `project_dist/gradle`: a Gradle project whose `MainActivity`
-  extends NucleantApplication's `org.nucleantui.NucleantActivity` (compiled
-  from NucleantApplication's `Android/java`), plus the Main Swift Package
+  extends NucleantApplication's `org.nucleantui.NucleantActivity`. It compiles
+  the `Android/java` of every package in the Swift graph (NucleantApplication's
+  Activity, and any package's Java its Swift calls into), staged after the
+  Swift build from the packages SwiftPM resolved. Next to it is the Main Swift Package
   (`project_dist/gradle/swift`) that Gradle cross-compiles per ABI with the
   pinned Swift toolchain and Swift Android SDK, staging `libNucleantMain.so`,
   the Swift runtime (Foundation and Observation included) and the vendored

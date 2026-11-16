@@ -74,3 +74,38 @@ def test_names():
     assert swift_identifier("my-app") == "MyApp"
     assert swift_identifier("NucleantAppTest") == "NucleantAppTest"
     assert swift_identifier("2048") == "App2048"
+
+
+def test_gradle_compiles_every_swift_packages_android_java(tmp_path: Path):
+    from enum import StrEnum
+
+    from nucleant_bootstraps.bootstraps.nucleantui.gradle_build_files import GradleBuildFiles
+
+    class Arch(StrEnum):
+        X86_64 = "x86_64"
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    GradleBuildFiles.write_app_build_gradle(
+        project_dir=tmp_path,
+        app_dir=app_dir,
+        package_name="org.example.app",
+        archs=[Arch.X86_64],
+        compile_sdk=36,
+        min_sdk=28,
+        target_sdk=36,
+        swift_main=tmp_path / "swift",
+    )
+    build = (app_dir / "build.gradle.kts").read_text()
+
+    # Every package's Android/java, staged from the packages SwiftPM resolved...
+    assert 'val nucleantJavaDir = layout.buildDirectory.dir("generated/packageJava")' in build
+    assert "workspace-state.json" in build
+    assert 'tasks.register<Sync>("stagePackageJava")' in build
+    assert 'File(it, "Android/java")' in build
+    # ...compiled with the app, after it is staged.
+    assert "java.srcDir(nucleantJavaDir)" in build
+    assert "dependsOn(buildSwiftAll, stagePackageJava)" in build
+    # Not one package's Java found by a guess at generation time.
+    assert "{nucleant_java_dir}" not in build
+    assert "checkouts/NucleantApplication/Android/java" not in build
